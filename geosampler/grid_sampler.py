@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from geosampler import grid_sampler
 import os
 from scipy.spatial.distance import jensenshannon
+from tqdm import tqdm
 
 def grid_sampler(
     input_dataset: rasterio.io.DatasetReader,
@@ -115,7 +116,7 @@ def get_patches(
                     histogram_jk, _ = np.histogram(patches_arrays[j][1][band, :, :], bins=256, range=(0, 255))
                     # print(histogram_ik.shape, histogram_jk.shape)
                     distance_matrix[i, j] += jensenshannon(histogram_ik, histogram_jk)
-    
+
     print(distance_matrix)
         
     return patches
