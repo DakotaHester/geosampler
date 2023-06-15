@@ -7,7 +7,8 @@ import matplotlib.pyplot as plt
 from geosampler import grid_sampler
 import os
 from scipy.spatial.distance import jensenshannon
-from tqdm import tqdm
+from tqdm import tqdm, trange
+from fast_histogram import histogram1d
 
 def grid_sampler(
     input_dataset: rasterio.io.DatasetReader,
@@ -99,24 +100,38 @@ def get_patches(
     
     # get js distance matrix
     # for aoi, patch in zip(patches_arrays):
-    distance_matrix = np.zeros((len(patches_arrays), len(patches_arrays)))
+    
+    distance_matrix = get_js_distance_matrix(patches_arrays)
+    
+    sum_distances = np.sum(distance_matrix, axis=1)
+    # sort patches by distance 
+    # https://stackoverflow.com/a/6618543
+    sorted_patches_by_distance = [patch for _, patch in sorted(zip(sum_distances, patches_arrays), key=lambda pair: pair[0])]
+    
+    return patches
+
+def get_js_distance_matrix(patches: list[tuple[slice]]) -> np.ndarray[np.float64]:
+    
+    n_patches = len(patches)
+    
+    distance_matrix = np.zeros((n_patches, n_patches))
         
-    for i in range(len(patches_arrays)):
-        for j in range(len(patches_arrays)):
-            # matrix is symmetric
-            if i < j:
-                distance_matrix[j, i] = distance_matrix[i, j]
-            # don't compare patch to itself
-            elif i == j:
-                continue
+    for i in trange(n_patches-1, -1, -1, desc='Computing JS distance matrix'):
+        for j in range(n_patches):
+            # matrix is symmetric, don't compute twice
+            if j >= i:
+                break
             # compute js distance
             else:
-                for band in range(patches_arrays[0][1].shape[0]):
-                    histogram_ik, _ = np.histogram(patches_arrays[i][1][band, :, :], bins=256, range=(0, 255))
-                    histogram_jk, _ = np.histogram(patches_arrays[j][1][band, :, :], bins=256, range=(0, 255))
+                for band in range(patches[0][1].shape[0]):
                     # print(histogram_ik.shape, histogram_jk.shape)
-                    distance_matrix[i, j] += jensenshannon(histogram_ik, histogram_jk)
+                    distance_matrix[i, j] += jensenshannon(
+                        histogram1d(patches[i][1][band, :, :], bins=256, range=(0, 255)), 
+                        histogram1d(patches[j][1][band, :, :], bins=256, range=(0, 255))
+                    )
+    
+    distance_matrix = distance_matrix + distance_matrix.T
 
     print(distance_matrix)
-        
-    return patches
+    
+    return distance_matrix
