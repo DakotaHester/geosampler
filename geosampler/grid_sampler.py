@@ -20,6 +20,7 @@ def grid_sampler(
     previously_sampled_regions: list[Window] = None,
     out_dir: str = 'data',
     name: str = 'test',
+    save: bool = True,
 ) -> list[tuple[np.ndarray[np.uint8], np.ndarray[np.uint8], Window]]:
     """Sample a raster dataset using a grid sampling method.
     
@@ -46,32 +47,32 @@ def grid_sampler(
     if type(patch_size) == int: patch_size = (patch_size, patch_size)
     if not previously_sampled_regions: previously_sampled_regions = []
     
-    # patches = 3-tuple(input, target, window)
-    patches = get_patches(input_dataset, target_dataset, patch_size, previously_sampled_regions)
-    n_samples = int(len(patches) * split)
+    if method.endswith('js_distance'):
+        # patches = 3-tuple(input, target, window)
+        patches = get_full_grid(input_dataset, target_dataset, patch_size, previously_sampled_regions)
+        n_samples = int(len(patches) * split)
     
-    if method == 'max_js_distance':
-        distance_matrix = get_js_distance_matrix(patches)
-        sum_distances = np.sum(distance_matrix, axis=1)
-        print(sum_distances)
-        # sort patches by distance 
-        # https://stackoverflow.com/a/6618543
-        sorted_patches_by_distance = [patch for _, patch in sorted(zip(sum_distances, patches), key=lambda pair: pair[0])].reverse()
-        sampled_patches = sorted_patches_by_distance[:n_samples]
-    elif method == 'min_js_distance':
         distance_matrix = get_js_distance_matrix(patches)
         sum_distances = np.sum(distance_matrix, axis=1)
         # sort patches by distance 
         # https://stackoverflow.com/a/6618543
-        sorted_patches_by_distance = [patch for _, patch in sorted(zip(sum_distances, patches), key=lambda pair: pair[0])]
-        sampled_patches = sorted_patches_by_distance[:n_samples]
+        if method.startswith('max'):
+            sorted_patches_by_distance = [patch for _, patch in sorted(zip(sum_distances, patches), key=lambda pair: pair[0], reverse=True)]
+        else:
+            sorted_patches_by_distance = [patch for _, patch in sorted(zip(sum_distances, patches), key=lambda pair: pair[0])]
+        
+        if method.startswith('uniform'):
+            multiple = int(1.0 / split)
+            sampled_patches = [patch for i, patch in enumerate(sorted_patches_by_distance) if i % multiple == 0]
+        else:
+            sampled_patches = sorted_patches_by_distance[:n_samples]
     elif method == 'random':
+        raise NotImplementedError('Random sampling from grid not yet implemented')
         sampled_patches = np.random.choice(patches, n_samples, replace=False)
     else:
         raise ValueError(f'Invalid sampling method: {method}')
     
-    # TODO implement this
-    save_patches(sampled_patches, input_dataset.meta, out_dir, name)
+    if save: save_patches(sampled_patches, input_dataset.meta, out_dir, name)
     
     return sampled_patches
 
@@ -80,10 +81,11 @@ def random_sampler(
     target_dataset: rasterio.io.DatasetReader,
     patch_size: int | tuple[int, int],
     n_samples: int,
-    allow_overlap: bool = False,
+    allow_overlap: bool = True,
     previously_sampled_regions: list[Window] = None,
     out_dir: str = 'data',
     name: str = 'train',
+    save: bool = True,
 ) -> list[tuple[np.ndarray[np.uint8], np.ndarray[np.uint8], Window]]:
     
     if type(patch_size) == int: patch_size = (patch_size, patch_size)
@@ -93,16 +95,26 @@ def random_sampler(
     range_horizontal = range(input_dataset.width - patch_size[1])
     
     patches = []
-    while len(patches) < n_samples:
-        sample_vertical, sample_horizontal = np.random.choice(range_vertical), np.random.choice(range_horizontal)
-        sample_window = Window(sample_vertical, sample_horizontal, patch_size[0], patch_size[1])
-        
-        if sample_window in previously_sampled_regions or sample_window in patches[:, 2]
-        
-        
-        input_np, target_np = load_arrays_from_window(window, input_dataset, target_dataset)
-        if input_np is False or target_np is False: continue
-        else: patches.append((input_np, target_np, window))
+    with tqdm(total=n_samples, desc="Sampling patches randomly") as pbar:
+        while len(patches) < n_samples:
+            prev_windows = [patch[2] for patch in patches]
+            sample_vertical, sample_horizontal = np.random.choice(range_vertical), np.random.choice(range_horizontal)
+            # dataset[:, distance from top, distance from left]
+            aoi_slices = (slice(sample_vertical, sample_vertical + patch_size[0]), slice(sample_horizontal, sample_horizontal + patch_size[1]))
+            sample_window = get_window_from_aoi(aoi_slices)
+            
+            if sample_window in previously_sampled_regions or sample_window in prev_windows: continue # prevent dupes
+            if window_already_sampled(sample_window, previously_sampled_regions): continue # prevent overlap with previously sampled regions
+            if not allow_overlap and window_already_sampled(sample_window, prev_windows): continue # prevent overlap with current samples
+            
+            input_np, target_np = load_arrays_from_window(sample_window, input_dataset, target_dataset)
+            if input_np is False or target_np is False: continue
+            else: 
+                patches.append((input_np, target_np, sample_window))
+                pbar.update(1)
+    
+    if save: save_patches(patches, input_dataset.meta, out_dir, name)
+    return patches
     
 def get_window_from_aoi(
     aoi_slices: tuple[slice, slice],
@@ -118,7 +130,7 @@ def load_arrays_from_window(
     if input_dataset.nodata in input_np or target_dataset.nodata in target_np: return False
     else: return input_np, target_np
 
-def get_patches(
+def get_full_grid(
     input_dataset: rasterio.io.DatasetReader, 
     target_dataset: rasterio.io.DatasetReader,
     patch_size: int | tuple[int, int],
@@ -135,7 +147,7 @@ def get_patches(
     patches_arrays = []
     
     # get all valid patches
-    for i in trange(height // patch_size[1], desc='Sampling patches'):
+    for i in trange(height // patch_size[1], desc='Sampling all patches from grid'):
         for j in range(width // patch_size[0]):
             
             # dataset[:, distance from top, distance from left]
@@ -175,11 +187,14 @@ def window_already_sampled(
     window: Window,
     previous_sampled: list[Window],
 ) -> bool:
-    try:
-        for sampled in previous_sampled:
-            rasterio.windows.intersect(window, sampled)
-    except rasterio.errors.WindowError:
-        return True
+    for sampled in previous_sampled:
+        try:
+            if rasterio.windows.intersect(window, sampled):
+                return True
+            else: continue
+        except rasterio.errors.WindowError as e:
+            RuntimeWarning(f'WindowError: {e}')
+            continue
     return False
 
 def save_patches(
